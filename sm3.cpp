@@ -130,3 +130,123 @@ static void message_expansion(const uint8_t* block, uint32_t W[68], uint32_t W1[
         W1[i] = W[i] ^ W[i + 4];
     }
 }
+
+/**
+ * @brief 压缩函数：处理单个512位消息块
+ * @param state 当前状态向量（8个32位字），压缩后会被更新
+ * @param block 输入消息块（512位，64字节）
+ */
+static void compress(uint32_t state[SM3_IV_NUM], const uint8_t* block) {
+    if (state == NULL || block == NULL) return;
+
+    uint32_t W[68] = { 0 };    // 扩展消息字
+    uint32_t W1[64] = { 0 };   // 派生消息字
+    uint32_t A, B, C, D, E, F, G, H;  // 寄存器变量
+    uint32_t SS1, SS2, TT1, TT2;      // 中间变量
+
+    // 消息扩展：生成W和W1
+    message_expansion(block, W, W1);
+
+    // 初始化寄存器为当前状态值
+    A = state[0], B = state[1], C = state[2], D = state[3];
+    E = state[4], F = state[5], G = state[6], H = state[7];
+
+    // 64轮迭代压缩
+    for (int j = 0; j < SM3_ITER_ROUNDS; j++) {
+        // 计算中间变量SS1、SS2
+        SS1 = ROL(ROL(A, 12) + E + ROL(T[j], j), 7);
+        SS2 = SS1 ^ ROL(A, 12);
+        
+        // 计算TT1、TT2
+        TT1 = FF(A, B, C, j) + D + SS2 + W1[j];
+        TT2 = GG(E, F, G, j) + H + SS1 + W[j];
+
+        // 更新寄存器值（类似Feistel结构）
+        D = C;
+        C = ROL(B, 9);
+        B = A;
+        A = TT1;
+        H = G;
+        G = ROL(F, 19);
+        F = E;
+        E = P0(TT2);
+    }
+
+    // 将压缩结果与原始状态进行异或得到新状态
+    state[0] ^= A;
+    state[1] ^= B;
+    state[2] ^= C;
+    state[3] ^= D;
+    state[4] ^= E;
+    state[5] ^= F;
+    state[6] ^= G;
+    state[7] ^= H;
+}
+
+int sm3_hash(const uint8_t* input, size_t input_len, uint8_t* output) {
+    if (output == NULL) return -1;
+
+    uint8_t* padded_msg = NULL;    // 填充后消息
+    size_t padded_len = 0;         // 填充后消息长度
+    uint32_t state[SM3_IV_NUM];    // 哈希状态
+
+    // 步骤1：消息填充
+    sm3_padding(input, input_len, &padded_msg, &padded_len);
+    if (padded_msg == NULL || padded_len == 0) {
+        fprintf(stderr, "消息填充失败\n");
+        return -1;
+    }
+
+    // 步骤2：初始化哈希状态为IV
+    memcpy(state, IV, sizeof(IV));
+
+    // 步骤3：迭代处理每个消息块
+    for (size_t i = 0; i < padded_len; i += SM3_BLOCK_SIZE) {
+        compress(state, padded_msg + i);
+    }
+
+    // 步骤4：将最终状态转换为字节序列（大端序）
+    for (int i = 0; i < SM3_IV_NUM; i++) {
+        output[i * 4 + 0] = (state[i] >> 24) & 0xFF;
+        output[i * 4 + 1] = (state[i] >> 16) & 0xFF;
+        output[i * 4 + 2] = (state[i] >> 8) & 0xFF;
+        output[i * 4 + 3] = (state[i] >> 0) & 0xFF;
+    }
+
+    // 释放填充消息内存
+    free(padded_msg);
+    return 0;
+}
+
+/**
+ * @brief 主函数：命令行SM3哈希工具
+ */
+int main(int argc, char* argv[]) {
+    // 检查命令行参数
+    if (argc != 2) {
+        fprintf(stderr, "\nSM3算法工具（Visual Studio 2022）\n");
+        fprintf(stderr, "用法：%s \"输入字符串\"\n", argv[0]);
+        fprintf(stderr, "示例：%s \"abc\"          # 计算\"abc\"的SM3哈希\n", argv[0]);
+        fprintf(stderr, "      %s \"\"             # 计算空字符串的SM3哈希\n", argv[0]);
+        return -1;
+    }
+
+    char* input_str = argv[1];     // 获取输入字符串
+    uint8_t hash[SM3_HASH_SIZE];   // 哈希结果缓冲区
+    size_t str_len = strlen(input_str);  // 输入字符串长度
+
+    // 计算SM3哈希
+    if (sm3_hash((uint8_t*)input_str, str_len, hash) != 0) {
+        fprintf(stderr, "SM3哈希计算失败\n");
+        return -1;
+    }
+
+    // 输出哈希结果
+    printf("SM3哈希值（输入：\"%s\"）：\n", input_str);
+    for (int i = 0; i < SM3_HASH_SIZE; i++) {
+        printf("%02x", hash[i]);
+    }
+    printf("\n");
+
+    return 0;
+}
