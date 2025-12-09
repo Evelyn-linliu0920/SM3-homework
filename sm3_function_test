@@ -1,0 +1,471 @@
+#include "sm3.h"
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>  // 用于控制台字体配置
+#else
+#include <sys/time.h>
+#include <unistd.h>
+#endif
+
+// -------------------------- 核心修复1：初始化Windows控制台（解决乱码） --------------------------
+#ifdef _WIN32
+// 设置控制台编码为GBK（匹配中文环境）+ 支持中文的字体
+static void init_windows_console() {
+    // 1. 输入输出编码设为GBK（代码页936，Windows默认中文编码）
+    SetConsoleCP(936);
+    SetConsoleOutputCP(936);
+
+    // 2. 配置控制台字体为"新宋体"（避免字体导致的中文乱码）
+    CONSOLE_FONT_INFOEX cfi;
+    cfi.cbSize = sizeof(CONSOLE_FONT_INFOEX);
+    GetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi);
+    // 宽字符复制：目标缓冲区、缓冲区长度、源字符串
+    wcscpy_s(cfi.FaceName, _countof(cfi.FaceName), L"新宋体");
+    cfi.dwFontSize.Y = 16;  // 字体大小，确保显示清晰
+    SetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi);
+}
+#endif
+
+// -------------------------- 核心修复2：辅助工具函数（支撑大作业测试） --------------------------
+// 生成指定长度的随机字节流（抗碰撞测试用）
+static unsigned char* generate_random_input(size_t len) {
+    if (len == 0) return NULL;
+    unsigned char* data = (unsigned char*)malloc(len);
+    if (data == NULL) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        // 修复：使用更安全的类型转换
+        data[i] = (unsigned char)(rand() & 0xFF);  // 0~255随机字节
+    }
+    return data;
+}
+
+// 比较两个哈希值是否相同（碰撞检测用）
+static int hash_equal(const unsigned char* h1, const unsigned char* h2) {
+    for (int i = 0; i < SM3_DIGEST_SIZE; i++) {
+        if (h1[i] != h2[i]) return 0;
+    }
+    return 1;
+}
+
+// 翻转指定字节的指定比特（雪崩效应测试用）
+static void flip_bit(unsigned char* data, size_t byte_idx, int bit_idx) {
+    if (data == NULL) return;
+    // 修复：确保索引在有效范围内
+    if (byte_idx >= 0 && byte_idx < 1024 && bit_idx >= 0 && bit_idx < 8) {
+        data[byte_idx] ^= (1 << (7 - bit_idx));  // bit0=最高位，bit7=最低位
+    }
+}
+
+// 统计两个哈希值的比特差异数（雪崩效应测试用）
+static int count_bit_diff(const unsigned char* h1, const unsigned char* h2) {
+    if (h1 == NULL || h2 == NULL) return -1;
+    int diff_count = 0;
+    for (int i = 0; i < SM3_DIGEST_SIZE; i++) {
+        unsigned char xor_val = h1[i] ^ h2[i];
+        // 统计异或结果中1的个数（汉明距离）
+        while (xor_val) {
+            diff_count += xor_val & 1;
+            xor_val >>= 1;
+        }
+    }
+    return diff_count;
+}
+
+// 自定义strdup替代函数（解决VS中strdup弃用警告）
+static char* my_strdup(const char* str) {
+    if (str == NULL) return NULL;
+    size_t len = strlen(str) + 1;
+    char* new_str = (char*)malloc(len);
+    if (new_str != NULL) {
+        memcpy(new_str, str, len);
+    }
+    return new_str;
+}
+
+// -------------------------- 大作业测试1：标准测试用例（保留原始逻辑） --------------------------
+static void standard_test_cases() {
+    printf("=== 一、标准测试用例验证（国家密码管理局用例） ===\n");
+
+    // 测试用例1: 空字符串
+    printf("测试1 (空字符串):\n");
+    const char* test1 = "";
+    unsigned char hash1[SM3_DIGEST_SIZE];
+    sm3_str_hash(test1, hash1);
+    char* result1 = sm3_hash_to_string(hash1);
+    printf("实际结果: %s\n", result1);
+    printf("期望结果: 1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b\n");
+    printf("结果对比: %s\n\n",
+        strcmp(result1, "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b") == 0 ? "通过" : "失败");
+
+    // 测试用例2: "abc"
+    printf("测试2 (\"abc\"):\n");
+    const char* test2 = "abc";
+    unsigned char hash2[SM3_DIGEST_SIZE];
+    sm3_str_hash(test2, hash2);
+    char* result2 = sm3_hash_to_string(hash2);
+    printf("实际结果: %s\n", result2);
+    printf("期望结果: 66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0\n");
+    printf("结果对比: %s\n\n",
+        strcmp(result2, "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0") == 0 ? "通过" : "失败");
+
+    // 测试用例3: "abcd"重复16次
+    printf("测试3 (\"abcd\"×16):\n");
+    char test3[65];
+    for (int i = 0; i < 16; i++) {
+        memcpy(test3 + i * 4, "abcd", 4);
+    }
+    test3[64] = '\0';
+    unsigned char hash3[SM3_DIGEST_SIZE];
+    sm3_str_hash(test3, hash3);
+    char* result3 = sm3_hash_to_string(hash3);
+    printf("实际结果: %s\n", result3);
+    printf("期望结果: debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732\n");
+    printf("结果对比: %s\n\n",
+        strcmp(result3, "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732") == 0 ? "通过" : "失败");
+    printf("========================================================================\n\n");
+}
+
+// -------------------------- 大作业测试2：边界用例验证（新增，4组场景） --------------------------
+static void boundary_test_cases() {
+    printf("=== 二、边界用例验证 ===\n");
+
+    // 边界1：空文件（与空字符串哈希一致）
+    printf("1. 空文件输入（自动创建empty_test.txt）:\n");
+    FILE* empty_file = fopen("empty_test.txt", "wb");  // 创建0字节文件
+    if (empty_file != NULL) fclose(empty_file);
+
+    unsigned char file_hash[SM3_DIGEST_SIZE];
+    int ret = sm3_file_hash("empty_test.txt", file_hash);
+    char* file_result = sm3_hash_to_string(file_hash);
+    const char* expect_empty = "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b";
+
+    printf("  空文件哈希值：%s\n", file_result);
+    printf("  预期结果（与空字符串一致）：%s\n", expect_empty);
+    printf("  验证结果：%s\n\n", strcmp(file_result, expect_empty) == 0 ? "通过" : "失败");
+    remove("empty_test.txt");  // 测试后删除临时文件
+
+    // 边界2：1字节输入（"a"，8bit）
+    printf("2. 1字节输入（\"a\"，8bit）:\n");
+    const char* test_1byte = "a";
+    unsigned char hash_1byte[SM3_DIGEST_SIZE];
+    sm3_str_hash(test_1byte, hash_1byte);
+    char* result_1byte = sm3_hash_to_string(hash_1byte);
+    const char* expect_1byte = "623476ac18f65a2909e43c7fec61b49c7e764a91a18ccb82f1917a29c86c5e88";
+
+    printf("  实际结果：%s\n", result_1byte);
+    printf("  预期结果（OpenSSL）：%s\n", expect_1byte);
+    printf("  验证结果：%s\n\n", strcmp(result_1byte, expect_1byte) == 0 ? "通过" : "失败");
+
+    // 边界3：448bit输入（56个"a"，56字节=448bit）
+    printf("3. 448bit输入（56个\"a\"）:\n");
+    char test_448bit[57] = { 0 };
+    memset(test_448bit, 'a', 56);  // 填充56个'a'
+    unsigned char hash_448bit[SM3_DIGEST_SIZE];
+    sm3_str_hash(test_448bit, hash_448bit);
+    char* result_448bit = sm3_hash_to_string(hash_448bit);
+    const char* expect_448bit = "ba00ebedaab54065a5fd4f9f56326016203166bcee3eed44ea868d59d67aa3c8";
+
+    printf("  实际结果：%s\n", result_448bit);
+    printf("  预期结果（OpenSSL）：%s\n", expect_448bit);
+    printf("  验证结果：%s\n\n", strcmp(result_448bit, expect_448bit) == 0 ? "通过" : "失败");
+
+    // 边界4：多分组输入（1024字节，2个512bit分组）
+    printf("4. 多分组输入（1024字节，\"a\"×1024）:\n");
+    char* test_1024byte = (char*)malloc(1024 + 1);
+    if (test_1024byte != NULL) {
+        memset(test_1024byte, 'a', 1024);
+        test_1024byte[1024] = '\0';
+        unsigned char hash_1024byte[SM3_DIGEST_SIZE];
+        sm3_str_hash(test_1024byte, hash_1024byte);
+        char* result_1024byte = sm3_hash_to_string(hash_1024byte);
+        const char* expect_1024byte = "6aff6cad5c72b86cf9745150e119851fde962aff9fab45f517470ce7de2a43fa";
+
+        printf("  实际结果：%s\n", result_1024byte);
+        printf("  预期结果（OpenSSL）：%s\n", expect_1024byte);
+        printf("  验证结果：%s\n\n", strcmp(result_1024byte, expect_1024byte) == 0 ? "通过" : "失败");
+        free(test_1024byte);
+    }
+    else {
+        printf("  内存分配失败，测试跳过\n\n");
+    }
+    printf("========================================================================\n\n");
+}
+
+// -------------------------- 大作业测试3：抗碰撞性测试（新增，10000组样本） --------------------------
+static void collision_resistance_test() {
+    printf("=== 三、抗碰撞性测试 ===\n");
+    printf("测试方案：生成10000组随机输入（长度16~256字节），检测哈希碰撞\n");
+
+    const int TEST_COUNT = 10000;  // 大作业要求的样本数
+    const size_t MIN_LEN = 16;     // 最小输入长度（字节）
+    const size_t MAX_LEN = 256;    // 最大输入长度（字节）
+
+    // 存储所有哈希值（修复：正确初始化）
+    char** hash_records = (char**)calloc(TEST_COUNT, sizeof(char*));
+    if (hash_records == NULL) {
+        printf("内存分配失败，测试终止\n");
+        return;
+    }
+
+    int collision_count = 0;
+    uint64_t start_ms = 0;
+#ifdef _WIN32
+    start_ms = GetTickCount64();  // Windows高精度计时
+    srand((unsigned int)start_ms);  // 用当前时间做随机种子
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    start_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    srand((unsigned int)time(NULL) ^ getpid());
+#endif
+
+    // 生成测试样本并计算哈希
+    for (int i = 0; i < TEST_COUNT; i++) {
+        // 修复：使用 size_t 避免溢出
+        size_t input_len = MIN_LEN + (rand() % (MAX_LEN - MIN_LEN + 1));
+        unsigned char* input_data = generate_random_input(input_len);
+        if (input_data == NULL) {
+            printf("第%d组样本生成失败，跳过\n", i + 1);
+            continue;
+        }
+
+        // 计算哈希值
+        unsigned char hash[SM3_DIGEST_SIZE];
+        sm3_hash(input_data, input_len, hash);
+        hash_records[i] = my_strdup(sm3_hash_to_string(hash));
+
+        // 检测碰撞（与之前所有样本对比）
+        if (hash_records[i] != NULL) {
+            for (int j = 0; j < i; j++) {
+                if (hash_records[j] != NULL && strcmp(hash_records[i], hash_records[j]) == 0) {
+                    collision_count++;
+                    printf("发现碰撞：第%d组与第%d组输入哈希值相同\n", i + 1, j + 1);
+                    printf("  第%d组输入长度：%zu字节，哈希值：%s\n", i + 1, input_len, hash_records[i]);
+                }
+            }
+        }
+
+        free(input_data);  // 释放输入数据内存
+    }
+
+    // 计算测试耗时
+    uint64_t cost_ms = 0;
+#ifdef _WIN32
+    cost_ms = GetTickCount64() - start_ms;
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    cost_ms = (tv.tv_sec * 1000 + tv.tv_usec / 1000) - start_ms;
+#endif
+
+    // 输出测试结果
+    printf("\n测试完成：\n");
+    printf("  测试样本总数：%d组\n", TEST_COUNT);
+    printf("  输入长度范围：%zu~%zu字节\n", MIN_LEN, MAX_LEN);
+    printf("  测试耗时：%.2f秒\n", cost_ms / 1000.0);
+    printf("  碰撞次数：%d次\n", collision_count);
+    printf("  结论：%s\n", collision_count == 0 ? "通过：未检测到碰撞，符合抗碰撞性要求" : "失败：存在碰撞，算法异常");
+    printf("========================================================================\n\n");
+
+    // 释放内存
+    for (int i = 0; i < TEST_COUNT; i++) {
+        if (hash_records[i] != NULL) free(hash_records[i]);
+    }
+    free(hash_records);
+}
+
+// -------------------------- 大作业测试4：雪崩效应测试（新增，5次比特翻转） --------------------------
+static void avalanche_effect_test() {
+    printf("=== 四、雪崩效应测试 ===\n");
+    printf("测试方案：对原始输入翻转1个比特，统计哈希值差异（标准要求≥128bit）\n");
+
+    // 原始输入（大作业指定："sm3_avalanche_test_2024"）
+    const char* original_input = "sm3_avalanche_test_2024";
+    size_t input_len = strlen(original_input);
+    unsigned char original_hash[SM3_DIGEST_SIZE];
+    sm3_str_hash(original_input, original_hash);
+
+    printf("基础信息：\n");
+    printf("  原始输入：%s\n", original_input);
+    printf("  原始输入长度：%zu字节（%zu bit）\n", input_len, input_len * 8);
+    printf("  原始哈希值：");
+    sm3_print_hash(original_hash);
+    printf("\n");
+
+    const int TEST_TIMES = 15;  // 大作业要求的测试次数
+    int total_diff = 0;        // 总差异比特数
+    int pass_count = 0;        // 符合标准（≥128bit）的次数
+
+    srand((unsigned int)time(NULL));  // 初始化随机种子
+
+    for (int t = 0; t < TEST_TIMES; t++) {
+        // 复制原始输入并翻转1个比特
+        unsigned char* modified_input = (unsigned char*)malloc(input_len);
+        if (modified_input == NULL) {
+            printf("测试%d：内存分配失败，跳过\n", t + 1);
+            continue;
+        }
+        memcpy(modified_input, original_input, input_len);
+
+        // 随机选择翻转位置（字节索引+比特索引）
+        size_t byte_idx = (size_t)(rand() % input_len);    // 0~input_len-1
+        int bit_idx = rand() % 8;                // 0（最高位）~7（最低位）
+        flip_bit(modified_input, byte_idx, bit_idx);
+
+        // 计算修改后的哈希值
+        unsigned char modified_hash[SM3_DIGEST_SIZE];
+        sm3_hash(modified_input, input_len, modified_hash);
+
+        // 统计差异比特数
+        int diff_count = count_bit_diff(original_hash, modified_hash);
+        if (diff_count != -1) {
+            total_diff += diff_count;
+            if (diff_count >= 128) pass_count++;
+        }
+
+        // 输出本次测试详情
+        printf("测试%d：\n", t + 1);
+        printf("  翻转位置：第%d字节第%d比特\n", (int)byte_idx + 1, bit_idx + 1);
+        printf("  修改后输入：");
+        for (size_t i = 0; i < input_len; i++) {
+            // 打印可显示字符，不可显示字符用"?"代替
+            if (modified_input[i] >= 32 && modified_input[i] <= 126) {
+                printf("%c", modified_input[i]);
+            }
+            else {
+                printf("?");
+            }
+        }
+        printf("\n");
+        printf("  修改后哈希：");
+        sm3_print_hash(modified_hash);
+        printf("  差异比特数：%d（标准要求≥128）\n", diff_count);
+        printf("  结果：%s\n\n", diff_count >= 128 ? "通过" : "失败");
+
+        free(modified_input);  // 释放内存
+    }
+
+    // 输出测试总结
+    double avg_diff = (TEST_TIMES > 0) ? (double)total_diff / TEST_TIMES : 0.0;
+    printf("雪崩效应总结：\n");
+    printf("  测试次数：%d次\n", TEST_TIMES);
+    printf("  平均差异比特数：%.1f bit\n", avg_diff);
+    printf("  符合标准次数：%d/%d\n", pass_count, TEST_TIMES);
+    printf("  结论：%s\n", avg_diff >= 128 ? "通过：符合雪崩效应要求" : "失败：不符合要求");
+    printf("========================================================================\n\n");
+}
+
+// -------------------------- 保留原始调试测试 --------------------------
+static void debug_test() {
+    printf("=== 调试测试 ===\n");
+
+    // 简单测试
+    const char* test = "abc";
+    unsigned char hash[SM3_DIGEST_SIZE];
+    sm3_str_hash(test, hash);
+
+    printf("输入: %s\n", test);
+    printf("哈希值: ");
+    sm3_print_hash(hash);
+    printf("\n");
+}
+
+// -------------------------- 优化用法说明（补充新测试选项） --------------------------
+static void print_usage(const char* program_name) {
+    printf("SM3算法测试工具（符合GM/T 0004-2012标准，Visual Studio兼容）\n");
+    printf("用法: %s [选项] [输入]\n", program_name);
+    printf("选项:\n");
+    printf("  基础功能：\n");
+    printf("    -s <字符串>   计算指定字符串的SM3哈希值\n");
+    printf("    -f <文件路径> 计算指定文件的SM3哈希值（支持二进制文件）\n");
+    printf("    -debug       运行简单调试测试（输入\"abc\"）\n");
+    printf("  大作业测试：\n");
+    printf("    -test-standard 运行标准测试用例（3组国家密码管理局用例）\n");
+    printf("    -test-boundary 运行边界用例测试（4组特殊场景）\n");
+    printf("    -test-collision 运行抗碰撞性测试（10000组随机样本）\n");
+    printf("    -test-avalanche 运行雪崩效应测试（5次比特翻转）\n");
+    printf("    -test-all     运行所有测试（标准+边界+抗碰撞+雪崩效应）\n");
+    printf("  帮助：\n");
+    printf("    -h           显示此帮助信息\n");
+    printf("\n示例:\n");
+    printf("  %s -s \"abc\"\n", program_name);
+    printf("  %s -f test.txt\n", program_name);
+    printf("  %s -test-all\n", program_name);
+}
+
+// -------------------------- 主函数（调用控制台初始化，解析命令行） --------------------------
+int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // 关键：启动时初始化控制台，解决中文乱码
+    init_windows_console();
+#endif
+
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    // 解析命令行参数
+    if (strcmp(argv[1], "-s") == 0) {
+        if (argc < 3) {
+            printf("错误: -s选项需要提供字符串参数（示例：%s -s \"abc\"）\n", argv[0]);
+            return 1;
+        }
+        unsigned char hash[SM3_DIGEST_SIZE];
+        sm3_str_hash(argv[2], hash);
+        printf("输入字符串: %s\n", argv[2]);
+        printf("SM3哈希值: ");
+        sm3_print_hash(hash);
+    }
+    else if (strcmp(argv[1], "-f") == 0) {
+        if (argc < 3) {
+            printf("错误: -f选项需要提供文件路径（示例：%s -f test.txt）\n", argv[0]);
+            return 1;
+        }
+        unsigned char hash[SM3_DIGEST_SIZE];
+        if (sm3_file_hash(argv[2], hash) == 0) {
+            printf("文件: %s\n", argv[2]);
+            printf("SM3哈希值: ");
+            sm3_print_hash(hash);
+        }
+        else {
+            printf("错误: 无法打开文件 %s（请检查路径是否正确）\n", argv[2]);
+            return 1;
+        }
+    }
+    else if (strcmp(argv[1], "-test-standard") == 0) {
+        standard_test_cases();
+    }
+    else if (strcmp(argv[1], "-test-boundary") == 0) {
+        boundary_test_cases();
+    }
+    else if (strcmp(argv[1], "-test-collision") == 0) {
+        collision_resistance_test();
+    }
+    else if (strcmp(argv[1], "-test-avalanche") == 0) {
+        avalanche_effect_test();
+    }
+    else if (strcmp(argv[1], "-test-all") == 0) {
+        standard_test_cases();
+        boundary_test_cases();
+        collision_resistance_test();
+        avalanche_effect_test();
+    }
+    else if (strcmp(argv[1], "-debug") == 0) {
+        debug_test();
+    }
+    else if (strcmp(argv[1], "-h") == 0) {
+        print_usage(argv[0]);
+    }
+    else {
+        printf("错误: 未知选项 %s\n", argv[1]);
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    return 0;
+}
