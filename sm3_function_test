@@ -14,12 +14,16 @@
 // -------------------------- 核心修复1：初始化Windows控制台（解决乱码） --------------------------
 #ifdef _WIN32
 // 设置控制台编码为GBK（匹配中文环境）+ 支持中文的字体
+// 此函数专门解决Windows环境下控制台中文显示乱码问题
+// 通过设置控制台代码页和字体，确保中文字符正确显示
 static void init_windows_console() {
     // 1. 输入输出编码设为GBK（代码页936，Windows默认中文编码）
+    // 这是修复中文显示的关键步骤，确保控制台能正确处理中文字符
     SetConsoleCP(936);
     SetConsoleOutputCP(936);
 
     // 2. 配置控制台字体为"新宋体"（避免字体导致的中文乱码）
+    // 某些Windows系统默认字体不支持中文，需要手动指定中文字体
     CONSOLE_FONT_INFOEX cfi;
     cfi.cbSize = sizeof(CONSOLE_FONT_INFOEX);
     GetCurrentConsoleFontEx(GetStdHandle(STD_OUTPUT_HANDLE), FALSE, &cfi);
@@ -32,18 +36,20 @@ static void init_windows_console() {
 
 // -------------------------- 核心修复2：辅助工具函数（支撑大作业测试） --------------------------
 // 生成指定长度的随机字节流（抗碰撞测试用）
+// 该函数动态分配内存，生成指定长度的随机数据，用于测试哈希函数的抗碰撞性
 static unsigned char* generate_random_input(size_t len) {
     if (len == 0) return NULL;
     unsigned char* data = (unsigned char*)malloc(len);
     if (data == NULL) return NULL;
     for (size_t i = 0; i < len; i++) {
-        // 修复：使用更安全的类型转换
+        // 修复：使用更安全的类型转换，确保生成0-255范围内的随机字节
         data[i] = (unsigned char)(rand() & 0xFF);  // 0~255随机字节
     }
     return data;
 }
 
 // 比较两个哈希值是否相同（碰撞检测用）
+// 此函数逐字节比较两个256位哈希值，用于检测是否发生哈希碰撞
 static int hash_equal(const unsigned char* h1, const unsigned char* h2) {
     for (int i = 0; i < SM3_DIGEST_SIZE; i++) {
         if (h1[i] != h2[i]) return 0;
@@ -52,15 +58,17 @@ static int hash_equal(const unsigned char* h1, const unsigned char* h2) {
 }
 
 // 翻转指定字节的指定比特（雪崩效应测试用）
+// 用于测试雪崩效应，通过翻转输入数据中的单个比特，观察哈希值的变化
 static void flip_bit(unsigned char* data, size_t byte_idx, int bit_idx) {
     if (data == NULL) return;
-    // 修复：确保索引在有效范围内
+    // 修复：确保索引在有效范围内，防止数组越界访问
     if (byte_idx >= 0 && byte_idx < 1024 && bit_idx >= 0 && bit_idx < 8) {
         data[byte_idx] ^= (1 << (7 - bit_idx));  // bit0=最高位，bit7=最低位
     }
 }
 
 // 统计两个哈希值的比特差异数（雪崩效应测试用）
+// 计算汉明距离，即两个哈希值在相同位置上比特值不同的数量
 static int count_bit_diff(const unsigned char* h1, const unsigned char* h2) {
     if (h1 == NULL || h2 == NULL) return -1;
     int diff_count = 0;
@@ -76,6 +84,7 @@ static int count_bit_diff(const unsigned char* h1, const unsigned char* h2) {
 }
 
 // 自定义strdup替代函数（解决VS中strdup弃用警告）
+// 由于Visual Studio将strdup标记为不安全，这里提供自定义实现
 static char* my_strdup(const char* str) {
     if (str == NULL) return NULL;
     size_t len = strlen(str) + 1;
@@ -87,6 +96,7 @@ static char* my_strdup(const char* str) {
 }
 
 // -------------------------- 大作业测试1：标准测试用例（保留原始逻辑） --------------------------
+// 执行国家密码管理局指定的标准测试用例，验证SM3算法的正确性
 static void standard_test_cases() {
     printf("=== 一、标准测试用例验证（国家密码管理局用例） ===\n");
 
@@ -130,6 +140,7 @@ static void standard_test_cases() {
 }
 
 // -------------------------- 大作业测试2：边界用例验证（新增，4组场景） --------------------------
+// 测试SM3算法在边界条件下的表现，包括空文件、单字节、特定长度等特殊场景
 static void boundary_test_cases() {
     printf("=== 二、边界用例验证 ===\n");
 
@@ -196,6 +207,7 @@ static void boundary_test_cases() {
 }
 
 // -------------------------- 大作业测试3：抗碰撞性测试（新增，10000组样本） --------------------------
+// 测试SM3算法的抗碰撞性，生成大量随机输入，检查是否有不同输入产生相同哈希值
 static void collision_resistance_test() {
     printf("=== 三、抗碰撞性测试 ===\n");
     printf("测试方案：生成10000组随机输入（长度16~256字节），检测哈希碰撞\n");
@@ -279,6 +291,7 @@ static void collision_resistance_test() {
 }
 
 // -------------------------- 大作业测试4：雪崩效应测试（新增，5次比特翻转） --------------------------
+// 测试SM3算法的雪崩效应，检查输入微小变化是否导致哈希值巨大变化
 static void avalanche_effect_test() {
     printf("=== 四、雪崩效应测试 ===\n");
     printf("测试方案：对原始输入翻转1个比特，统计哈希值差异（标准要求≥128bit）\n");
@@ -360,6 +373,7 @@ static void avalanche_effect_test() {
 }
 
 // -------------------------- 保留原始调试测试 --------------------------
+// 简单的调试测试函数，用于快速验证SM3算法的基本功能
 static void debug_test() {
     printf("=== 调试测试 ===\n");
 
@@ -375,6 +389,7 @@ static void debug_test() {
 }
 
 // -------------------------- 优化用法说明（补充新测试选项） --------------------------
+// 打印程序的详细使用说明，包括各种命令行选项和示例
 static void print_usage(const char* program_name) {
     printf("SM3算法测试工具（符合GM/T 0004-2012标准，Visual Studio兼容）\n");
     printf("用法: %s [选项] [输入]\n", program_name);
@@ -398,6 +413,7 @@ static void print_usage(const char* program_name) {
 }
 
 // -------------------------- 主函数（调用控制台初始化，解析命令行） --------------------------
+// 程序的入口点，负责初始化环境、解析命令行参数并调用相应的测试函数
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     // 关键：启动时初始化控制台，解决中文乱码
@@ -409,7 +425,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 解析命令行参数
+    // 解析命令行参数，根据不同的选项执行相应的功能
     if (strcmp(argv[1], "-s") == 0) {
         if (argc < 3) {
             printf("错误: -s选项需要提供字符串参数（示例：%s -s \"abc\"）\n", argv[0]);
